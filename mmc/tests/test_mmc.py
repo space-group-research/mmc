@@ -8,6 +8,7 @@ import sys
 import pytest
 
 import mmc
+from mmc.simulation import Simulation
 
 
 def test_mmc_imported():
