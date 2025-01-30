@@ -22,7 +22,7 @@ import scipy
 class Simulation(BaseModel):
     model_config = {
         # Will probably remove when users no longer have to pass in a list of Molecule for the mof
-        'arbitrary_types_allowed': True,
+        "arbitrary_types_allowed": True,
     }
     mof_xyz: FilePath
     mof: List[Molecule]
@@ -55,11 +55,16 @@ class Simulation(BaseModel):
             self.box_dim.value_in_unit(openmm.unit.nanometer),
             self.box_dim.value_in_unit(openmm.unit.nanometer),
             self.box_dim.value_in_unit(openmm.unit.nanometer),
-            90, 90, 90
+            90,
+            90,
+            90,
         )
 
         self._mof_top = Topology.from_molecules(self.mof)
-        self._mof_top.box_vectors = np.array([[self.box_dim, 0, 0], [0, self.box_dim, 0], [0, 0, self.box_dim]]) * unit.nanometer
+        self._mof_top.box_vectors = (
+            np.array([[self.box_dim, 0, 0], [0, self.box_dim, 0], [0, 0, self.box_dim]])
+            * unit.nanometer
+        )
         self._mof_top.is_periodic = self.is_periodic
 
         interchange = Interchange.from_smirnoff(
@@ -75,16 +80,16 @@ class Simulation(BaseModel):
         self._contexts = {0: self.build_context(0, self._mof_top.get_positions().m)}
 
     def gas_formation_energy(self):
-        gas_mols = [deepcopy(self.gas)]
+        gas_mols = [deepcopy(self._gas)]
         gas_top = Topology.from_molecules(gas_mols)
-        interchange = Interchange.from_smirnoff(topology=gas_top, force_field=self.ff)
+        interchange = Interchange.from_smirnoff(topology=gas_top, force_field=self._ff)
         openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
 
         openmm_sim = openmm.app.Simulation(
             gas_top.to_openmm(),
             openmm_sys,
-            self.integrator,
-            platform=openmm.Platform.getPlatform(self.platform_name),
+            deepcopy(self.integrator),
+            platform=openmm.Platform.getPlatformByName(self.platform_name),
         )
 
         openmm_sim.context.setPositions(self.gas_pos)
@@ -99,53 +104,43 @@ class Simulation(BaseModel):
 
         return probability >= random_number
 
-    def build_context(self, num_gases, positions) -> openmm.Context:
+    def system_energy(self, gases: openmm.unit.Quantity, minimize_energy: bool) -> float:
+        """
+        Calculate the system energy for a given configuration of gases.
+        Appends the gases to a brand new openmm Simulation and calculates the energy. 
+        Very inefficient.
+
+        Args:
+            gases: A numpy array of shape (N, 3) representing the positions of gas atoms,
+                multiplied by `openmm.unit.nanometer`.
+            minimize_energy: Whether to minimize the energy before calculating the potential energy.
+
+        Returns:
+            The potential energy of the system.
+        """
+        return 0
+        print(gases)
+        print(type(gases))
         mof_openmm_sys = deepcopy(self._mof_openmm_sys)
-
-        if num_gases != 0:
-            openff_top = deepcopy(self._mof_top)
-            gas_mols = [deepcopy(self._gas) for _ in range(num_gases)]
-            openff_top.add_molecules(gas_mols)
-            interchange = Interchange.from_smirnoff(
-                topology=openff_top, force_field=self._ff
-            )
-            openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
-
-            context = openmm.Context(
-                openmm_sys, self.integrator, openmm.Platform.getPlatformByName("CPU")
-            )
-            context.setPositions(positions)
-        else:
-            context = openmm.Context(
-                mof_openmm_sys,
-                self.integrator,
-                openmm.Platform.getPlatformByName("CPU"),
-            )
-            context.setPositions(positions)
-
-        return context
-
-    def system_energy(self, gases: np.ndarray, minimize_energy: bool) -> float:
-        mof_openmm_sys = deepcopy(self.mof_openmm_sys)
-        positions = deepcopy(self.mof_top.get_positions().m)
+        positions = deepcopy(self._mof_top.get_positions())
 
         if len(gases) != 0:
             gas_mols = [
-                deepcopy(self.gas) for _ in range(len(gases) // len(self.gas.atoms))
+                deepcopy(self._gas) for _ in range(len(gases) // len(self._gas.atoms))
             ]
             gas_top = Topology.from_molecules(gas_mols)
             gas_interchange = Interchange.from_smirnoff(
-                topology=gas_top, force_field=self.ff
+                topology=gas_top, force_field=self._ff
             )
             gas_openmm_sys = gas_interchange.to_openmm(combine_nonbonded_forces=False)
 
             # Create modeller with MOF topology and positions
             modeller = openmm.app.Modeller(
-                self.mof_top.to_openmm(), to_openmm(positions * unit.nanometer)
+                self._mof_top.to_openmm(), to_openmm(positions)
             )
 
             # Add gas topology and positions
-            gas_positions = ([x.m for x in gases] * openmm.unit.nanometer)
+            gas_positions = [x.value_in_units(openmm.unit.nanometer) for x in gases] * openmm.unit.nanometer
             modeller.add(gas_top.to_openmm(), gas_positions)
 
             # Get merged topology and positions
@@ -171,7 +166,7 @@ class Simulation(BaseModel):
                 openmm_integrator,
                 platform=openmm.Platform.getPlatformByName("CPU"),
             )
-            openmm_sim.context.setPositions(to_openmm(positions * unit.nanometer))
+            openmm_sim.context.setPositions(to_openmm(positions))
 
         pdb_reporter = openmm.app.PDBReporter("out.pdb", 1)
         openmm_sim.reporters.append(pdb_reporter)
@@ -189,9 +184,9 @@ class Simulation(BaseModel):
             rotation_matrix = scipy.spatial.transform.Rotation.random().as_matrix()
             shift = np.array(
                 [
-                    random.uniform(0, self.abc[0].value_in_unit(openmm.unit.nanometer)),
-                    random.uniform(0, self.abc[1].value_in_unit(openmm.unit.nanometer)),
-                    random.uniform(0, self.abc[2].value_in_unit(openmm.unit.nanometer)),
+                    random.uniform(0, self.box_dim.value_in_unit(openmm.unit.nanometer)),
+                    random.uniform(0, self.box_dim.value_in_unit(openmm.unit.nanometer)),
+                    random.uniform(0, self.box_dim.value_in_unit(openmm.unit.nanometer)),
                 ]
             )  # nm
             new_pos = np.dot(new_pos, rotation_matrix) + shift
@@ -199,12 +194,12 @@ class Simulation(BaseModel):
 
             for atom in new_pos:
                 for dim in atom:
-                    if dim < 0 or dim > max(self.abc):
+                    if dim < 0 or dim > self.box_dim.value_in_unit(openmm.unit.nanometer):
                         valid = False
 
             for existing_atom in current_positions.value_in_unit(openmm.unit.nanometer):
                 for new_atom in new_pos:
-                    if self.pbc.min_image(
+                    if self._pbc.min_image(
                         (existing_atom - new_atom)
                     ) < self.r_cutoff.value_in_unit(openmm.unit.nanometer):
                         valid = False
@@ -213,104 +208,173 @@ class Simulation(BaseModel):
                 continue
 
             return new_pos
-    
-    def get_context(self, num_gases: int) -> openmm.Context:
-        if num_gases not in contexts:
-            if num_gases - 1 not in contexts:
-                print("This function uses the next number smaller as the basis for the next context, and for some reason the context for the previous number of gases is not available.")
-                assert num_gases - 1 in contexts
 
-            previous_context = contexts[num_gases - 1]
+    def build_context(self, num_gases, positions) -> openmm.Context:
+        mof_openmm_sys = deepcopy(self._mof_openmm_sys)
+
+        if num_gases != 0:
+            openff_top = deepcopy(self._mof_top)
+            gas_mols = [deepcopy(self._gas) for _ in range(num_gases)]
+            openff_top.add_molecules(gas_mols)
+            interchange = Interchange.from_smirnoff(
+                topology=openff_top, force_field=self._ff
+            )
+            openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
+
+            context = openmm.Context(
+                openmm_sys, deepcopy(self.integrator), openmm.Platform.getPlatformByName("CPU")
+            )
+            context.setPositions(positions)
+        else:
+            context = openmm.Context(
+                mof_openmm_sys,
+                self.integrator,
+                openmm.Platform.getPlatformByName("CPU"),
+            )
+            context.setPositions(positions)
+
+        return context
+
+    def get_context(self, num_gases: int) -> openmm.Context:
+        if num_gases not in self._contexts:
+            if num_gases - 1 not in self._contexts:
+                print(
+                    "This function uses the next number smaller as the basis for the next context, and for some reason the context for the previous number of gases is not available."
+                )
+                assert num_gases - 1 in self._contexts
+
+            previous_context = self._contexts[num_gases - 1]
             previous_state = previous_context.getState(getPositions=True)
             previous_positions = previous_state.getPositions(asNumpy=True)
 
             new_positions = deepcopy(previous_positions)
-            new_gas_position = suggest_gas_position(new_positions)
-            total_positions = np.vstack((new_positions.value_in_unit(openmm.unit.nanometer), new_gas_position))
+            new_gas_position = self.suggest_gas_position(new_positions)
+            total_positions = np.vstack(
+                (new_positions.value_in_unit(openmm.unit.nanometer), new_gas_position)
+            )
 
-            new_context = build_context(num_gases, total_positions)
-            contexts[num_gases] = new_context
-        return contexts[num_gases]
+            new_context = self.build_context(num_gases, total_positions)
+            self._contexts[num_gases] = new_context
+        return self._contexts[num_gases]
 
     def simulate(self, steps: int) -> float:
         # gases = []  # Must be a list where elements are Quantity<[x, y, z] * unit.nanometer> coordinates
+        ATOMS_PER_GAS_MOLECULE = len(self._gas.atoms)
+        GAS_FORMATION_ENERGY = self.gas_formation_energy()
         num_gases = 0
-        old_energy = get_context(0, contexts).getState(getEnergy=True).getPotentialEnergy()
-
+        old_energy = (
+            self.get_context(0).getState(getEnergy=True).getPotentialEnergy()
+        )
 
         for timestep in range(1):
-            old_context = get_context(num_gases, contexts)
+            old_context = self.get_context(num_gases)
             operation = random.random()
             operation = 0.01
-            positions = old_context.getState(getPositions=True).getPositions(asNumpy=True)[:]
-            gases = old_context.getState(getPositions=True).getPositions(asNumpy=True)[len(MOF_TOP.get_positions()):]
+            positions = old_context.getState(getPositions=True).getPositions(
+                asNumpy=True
+            )[:]
+            gases = old_context.getState(getPositions=True).getPositions(asNumpy=True)[
+                len(self._mof_top.get_positions()) :
+            ]
             assert len(gases) % ATOMS_PER_GAS_MOLECULE == 0
 
-
-            if operation < PROB_INSERT_DELETE:  # Insert
-                print('Inserting')
-                new_context = get_context(num_gases + 1, contexts)
-                new_gas = suggest_gas_position(positions)
+            if operation < self.prob_insert_delete:  # Insert
+                print("Inserting")
+                new_context = self.get_context(num_gases + 1)
+                new_gas = self.suggest_gas_position(positions)
                 new_pos = np.vstack((positions, new_gas))
                 new_context.setPositions(new_pos)
 
                 print(new_context.getState(getEnergy=True).getPotentialEnergy())
                 LocalEnergyMinimizer.minimize(new_context)
 
-                new_energy = new_context.getState(getEnergy=True).getPotentialEnergy() - GAS_FORMATION_ENERGY
+                new_energy = (
+                    new_context.getState(getEnergy=True).getPotentialEnergy()
+                    - GAS_FORMATION_ENERGY
+                )
                 print(new_context.getState(getEnergy=True).getPotentialEnergy())
-                print('system_energy')
-                print(system_energy(([x * unit.nanometer for x in np.vstack((gases, new_gas))]), True))
-                print(system_energy(([x * unit.nanometer for x in np.vstack((gases, new_gas))]), False))
+                print("system_energy")
+                print(
+                    self.system_energy(
+                        ([x * unit.nanometer for x in np.vstack((gases, new_gas))]),
+                        True,
+                    )
+                )
+                print(
+                    self.system_energy(
+                        ([x * unit.nanometer for x in np.vstack((gases, new_gas))]),
+                        False,
+                    )
+                )
                 print()
 
-                if monte_carlo_test(new_energy, old_energy):
-                    print('Accepted')
+                if self.monte_carlo(new_energy, old_energy):
+                    print("Accepted")
                     num_gases += 1
                     old_energy = new_energy
-                    contexts[num_gases] = new_context
+                    self._contexts[num_gases] = new_context
 
             elif operation < 2 * PROB_INSERT_DELETE:  # Delete
                 if len(gases) == 0:
                     continue
-                print('Deleting')
-                new_context = get_context(num_gases - 1, contexts)
-                gas_to_remove = random.randint(0, (len(gases) // ATOMS_PER_GAS_MOLECULE) - 1)
-                gases = np.delete(gases, [gas_to_remove * ATOMS_PER_GAS_MOLECULE + i for i in range(ATOMS_PER_GAS_MOLECULE)], 0)
-                positions = np.vstack((positions[:len(MOF_TOP.get_positions())], gases))
+                print("Deleting")
+                new_context = self.get_context(num_gases - 1)
+                gas_to_remove = random.randint(
+                    0, (len(gases) // ATOMS_PER_GAS_MOLECULE) - 1
+                )
+                gases = np.delete(
+                    gases,
+                    [
+                        gas_to_remove * ATOMS_PER_GAS_MOLECULE + i
+                        for i in range(ATOMS_PER_GAS_MOLECULE)
+                    ],
+                    0,
+                )
+                positions = np.vstack(
+                    (positions[: len(MOF_TOP.get_positions())], gases)
+                )
                 new_context.setPositions(positions)
-                new_energy = new_context.getState(getEnergy=True).getPotentialEnergy() + GAS_FORMATION_ENERGY
+                new_energy = (
+                    new_context.getState(getEnergy=True).getPotentialEnergy()
+                    + GAS_FORMATION_ENERGY
+                )
 
                 if monte_carlo_test(new_energy, old_energy):
-                    print('Accepted')
+                    print("Accepted")
                     num_gases -= 1
                     old_energy = new_energy
-                    contexts[num_gases] = new_context
+                    self._contexts[num_gases] = new_context
 
             else:  # Translate
                 if len(gases) == 0:
                     continue
-                print('Translating')
-                new_context = get_context(num_gases, contexts)
-                old_positions = new_context.getState(getPositions=True).getPositions(asNumpy=True)[:]
+                print("Translating")
+                new_context = self.get_context(num_gases)
+                old_positions = new_context.getState(getPositions=True).getPositions(
+                    asNumpy=True
+                )[:]
 
-                gas_to_translate = random.randint(0, (len(gases) // ATOMS_PER_GAS_MOLECULE) - 1)
-                new_gas = suggest_gas_position(positions)
+                gas_to_translate = random.randint(
+                    0, (len(gases) // ATOMS_PER_GAS_MOLECULE) - 1
+                )
+                new_gas = self.suggest_gas_position(positions)
 
-                gases[gas_to_translate * ATOMS_PER_GAS_MOLECULE : (gas_to_translate + 1) * ATOMS_PER_GAS_MOLECULE] = new_gas * openmm.unit.nanometer
-                positions[len(MOF_TOP.get_positions()):] = gases
+                gases[
+                    gas_to_translate
+                    * ATOMS_PER_GAS_MOLECULE : (gas_to_translate + 1)
+                    * ATOMS_PER_GAS_MOLECULE
+                ] = (new_gas * openmm.unit.nanometer)
+                positions[len(MOF_TOP.get_positions()) :] = gases
                 new_context.setPositions(positions)
                 new_energy = new_context.getState(getEnergy=True).getPotentialEnergy()
 
                 if monte_carlo_test(new_energy, old_energy):
-                    print('Accepted')
+                    print("Accepted")
                     old_energy = new_energy
-                    contexts[num_gases] = new_context
+                    self._contexts[num_gases] = new_context
                 else:
                     new_context.setPositions(old_positions)
-                    contexts[num_gases] = new_context
-                
-            print('Step: ', timestep)
-            print('Num gas molecules:', num_gases)
+                    self._contexts[num_gases] = new_context
+            print("Step: ", timestep)
+            print("Num gas molecules:", num_gases)
             print()
-

@@ -83,3 +83,5 @@ def test_hkust_co2():
         'integrator': openmm.LangevinIntegrator(298, 1, 0.002),
         'platform_name': "CPU",
     })
+
+    sim.simulate(1)
