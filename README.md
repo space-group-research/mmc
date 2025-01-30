@@ -7,6 +7,11 @@ mmc
 
 Materials Monte Carlo simulation package
 
+# Conda Installation
+```
+micromamba create --name mof python=3.10 rdkit openff-toolkit openff-interchange openff-units openmm numpy scipy pytest -c conda-forge
+```
+
 ### Copyright
 
 Copyright (c) 2025, space-group-research

@@ -1,6 +1,5 @@
 """Provide the primary functions."""
 
-
 def canvas(with_attribution=True):
     """
     Placeholder function to show example docstring (NumPy format).
