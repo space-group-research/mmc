@@ -278,30 +278,3 @@ def create_empty_system():
     system.addForce(nonbonded_force)
 
     return system
-
-
-def build_context(num_gases, positions) -> openmm.Context:
-    mof_openmm_sys = deepcopy(MOF_OPENMM_SYS)
-
-    openmm_integrator = openmm.LangevinIntegrator(TEMP, 1, TIMESTEP)
-
-    if num_gases != 0:
-        openff_top = deepcopy(MOF_TOP)
-        gas_mols = [deepcopy(GAS) for _ in range(num_gases)]
-        openff_top.add_molecules(gas_mols)
-        interchange = Interchange.from_smirnoff(
-            topology=openff_top, force_field=OPENFF_FF
-        )
-        openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
-
-        context = openmm.Context(
-            openmm_sys, openmm_integrator, openmm.Platform.getPlatformByName("CPU")
-        )
-        context.setPositions(positions)
-    else:
-        context = openmm.Context(
-            mof_openmm_sys, openmm_integrator, openmm.Platform.getPlatformByName("CPU")
-        )
-        context.setPositions(positions)
-
-    return context

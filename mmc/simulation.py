@@ -1,4 +1,4 @@
-from mmc.utils import BOLTZMANN, append_system, build_context
+from mmc.utils import BOLTZMANN, append_system
 from mmc.pdb_wizard import PBC
 from pydantic import BaseModel, FilePath
 from typing import List
@@ -11,7 +11,7 @@ from openff.interchange import Interchange
 from openff.units import unit
 from openff.units.openmm import from_openmm, to_openmm
 import openmm
-from openmm import LocalEnergyMinimizer
+from openmm import LocalEnergyMinimizer, Context
 import numpy as np
 import sys
 import random
@@ -22,7 +22,7 @@ import scipy
 class Simulation(BaseModel):
     model_config = {
         # Will probably remove when users no longer have to pass in a list of Molecule for the mof
-        'arbitrary_types_allowed': True  
+        'arbitrary_types_allowed': True,
     }
     mof_xyz: FilePath
     mof: List[Molecule]
@@ -40,32 +40,39 @@ class Simulation(BaseModel):
     integrator: openmm.Integrator
     platform_name: str
 
+    _gas: Molecule
+    _ff: ForceField
+    _pbc: PBC
+    _mof_top: Topology
+    _mof_openmm_sys: openmm.System
+    _contexts: dict[int, Context]
+
     def __init__(self, **data):
         super().__init__(**data)
-        self.gas = Molecule.from_smiles(self.gas_smiles)
-        self.ff = ForceField(self.ff_path)
-        self.pbc = PBC(
+        self._gas = Molecule.from_smiles(self.gas_smiles)
+        self._ff = ForceField(self.ff_path)
+        self._pbc = PBC(
             self.box_dim.value_in_unit(openmm.unit.nanometer),
             self.box_dim.value_in_unit(openmm.unit.nanometer),
             self.box_dim.value_in_unit(openmm.unit.nanometer),
             90, 90, 90
         )
 
-        self.mof_top = Topology.from_molecules(self.mof)
-        self.mof_top.box_vectors = np.array([[self.box_dim, 0, 0], [0, self.box_dim, 0], [0, 0, self.box_dim]]) * unit.nanometer
-        self.mof_top.is_periodic = self.is_periodic
+        self._mof_top = Topology.from_molecules(self.mof)
+        self._mof_top.box_vectors = np.array([[self.box_dim, 0, 0], [0, self.box_dim, 0], [0, 0, self.box_dim]]) * unit.nanometer
+        self._mof_top.is_periodic = self.is_periodic
 
         interchange = Interchange.from_smirnoff(
-            topology=self.mof_top, force_field=self.ff
+            topology=self._mof_top, force_field=self._ff
         )
-        self.mof_openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
-        for i in range(self.mof_openmm_sys.getNumParticles()):
-            self.mof_openmm_sys.setParticleMass(i, 0.0)
+        self._mof_openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
+        for i in range(self._mof_openmm_sys.getNumParticles()):
+            self._mof_openmm_sys.setParticleMass(i, 0.0)
 
         if self.platform_name not in ["CPU", "GPU"]:
             raise Exception("Invalid platform name. Must be 'CPU' or 'GPU'")
 
-        self.contexts = {0: build_context(0, self.mof_top.get_positions().m)}
+        self._contexts = {0: self.build_context(0, self._mof_top.get_positions().m)}
 
     def gas_formation_energy(self):
         gas_mols = [deepcopy(self.gas)]
@@ -93,14 +100,14 @@ class Simulation(BaseModel):
         return probability >= random_number
 
     def build_context(self, num_gases, positions) -> openmm.Context:
-        mof_openmm_sys = deepcopy(self.mof_openmm_sys)
+        mof_openmm_sys = deepcopy(self._mof_openmm_sys)
 
         if num_gases != 0:
-            openff_top = deepcopy(self.mof_top)
-            gas_mols = [deepcopy(self.gas) for _ in range(num_gases)]
+            openff_top = deepcopy(self._mof_top)
+            gas_mols = [deepcopy(self._gas) for _ in range(num_gases)]
             openff_top.add_molecules(gas_mols)
             interchange = Interchange.from_smirnoff(
-                topology=openff_top, force_field=self.ff
+                topology=openff_top, force_field=self._ff
             )
             openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
 
