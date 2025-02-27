@@ -84,4 +84,4 @@ def test_hkust_co2():
         'platform_name': "CPU",
     })
 
-    sim.simulate(1)
+    sim.simulate(1000000, True)

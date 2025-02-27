@@ -1,3 +1,4 @@
+from math import inf
 from mmc.utils import BOLTZMANN, append_system
 from mmc.pdb_wizard import PBC
 from pydantic import BaseModel, FilePath
@@ -5,15 +6,16 @@ from typing import List
 from rdkit import Chem
 from rdkit.Chem import Draw
 from rdkit.Chem import rdDetermineBonds
-from rdkit.Chem.Draw import IPythonConsole
 from openff.toolkit import Molecule, Topology, ForceField
 from openff.interchange import Interchange
+import openff
 from openff.units import unit
 from openff.units.openmm import from_openmm, to_openmm
 import openmm
 from openmm import LocalEnergyMinimizer, Context
 import numpy as np
 import sys
+import time
 import random
 from copy import deepcopy
 import scipy
@@ -62,8 +64,11 @@ class Simulation(BaseModel):
 
         self._mof_top = Topology.from_molecules(self.mof)
         self._mof_top.box_vectors = (
-            np.array([[self.box_dim, 0, 0], [0, self.box_dim, 0], [0, 0, self.box_dim]])
-            * unit.nanometer
+            np.array([
+                [self.box_dim.value_in_unit(openmm.unit.nanometer), 0, 0],
+                [0, self.box_dim.value_in_unit(openmm.unit.nanometer), 0],
+                [0, 0, self.box_dim.value_in_unit(openmm.unit.nanometer)]
+            ]) * unit.nanometer
         )
         self._mof_top.is_periodic = self.is_periodic
 
@@ -78,6 +83,7 @@ class Simulation(BaseModel):
             raise Exception("Invalid platform name. Must be 'CPU' or 'GPU'")
 
         self._contexts = {0: self.build_context(0, self._mof_top.get_positions().m)}
+
 
     def gas_formation_energy(self):
         gas_mols = [deepcopy(self._gas)]
@@ -104,79 +110,48 @@ class Simulation(BaseModel):
 
         return probability >= random_number
 
-    def system_energy(self, gases: openmm.unit.Quantity, minimize_energy: bool) -> float:
-        """
-        Calculate the system energy for a given configuration of gases.
-        Appends the gases to a brand new openmm Simulation and calculates the energy. 
-        Very inefficient.
 
-        Args:
-            gases: A numpy array of shape (N, 3) representing the positions of gas atoms,
-                multiplied by `openmm.unit.nanometer`.
-            minimize_energy: Whether to minimize the energy before calculating the potential energy.
-
-        Returns:
-            The potential energy of the system.
-        """
-        return 0
-        print(gases)
-        print(type(gases))
+    def system_energy(
+        self, positions: np.ndarray, minimize_energy: bool, num_gases: int
+    ) -> float:
         mof_openmm_sys = deepcopy(self._mof_openmm_sys)
-        positions = deepcopy(self._mof_top.get_positions())
 
-        if len(gases) != 0:
-            gas_mols = [
-                deepcopy(self._gas) for _ in range(len(gases) // len(self._gas.atoms))
-            ]
-            gas_top = Topology.from_molecules(gas_mols)
-            gas_interchange = Interchange.from_smirnoff(
-                topology=gas_top, force_field=self._ff
+        if num_gases != 0:
+            gas_mols = [deepcopy(self._gas) for _ in range(num_gases)]
+            system_top = deepcopy(self._mof_top)
+            system_top.add_molecules(gas_mols)
+            system_top.set_positions(positions * unit.nanometer)
+
+            interchange = Interchange.from_smirnoff(
+                topology=system_top, force_field=self._ff
             )
-            gas_openmm_sys = gas_interchange.to_openmm(combine_nonbonded_forces=False)
+            openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
 
-            # Create modeller with MOF topology and positions
-            modeller = openmm.app.Modeller(
-                self._mof_top.to_openmm(), to_openmm(positions)
-            )
-
-            # Add gas topology and positions
-            gas_positions = [x.value_in_units(openmm.unit.nanometer) for x in gases] * openmm.unit.nanometer
-            modeller.add(gas_top.to_openmm(), gas_positions)
-
-            # Get merged topology and positions
-            merged_top = modeller.topology
-            merged_positions = modeller.positions
-
-            # Combine force systems
-            append_system(mof_openmm_sys, gas_openmm_sys, 1 * unit.nanometer)
-
-            openmm_integrator = self.integrator
             openmm_sim = openmm.app.Simulation(
-                merged_top,
-                mof_openmm_sys,
-                openmm_integrator,
-                platform=openmm.Platform.getPlatformByName("CPU"),
+                system_top.to_openmm(),
+                openmm_sys,
+                deepcopy(self.integrator),
+                platform=openmm.Platform.getPlatformByName(self.platform_name),
             )
-            openmm_sim.context.setPositions(merged_positions)
+            openmm_sim.context.setPositions(positions)
         else:
-            openmm_integrator = self.integrator
             openmm_sim = openmm.app.Simulation(
-                self.mof_top.to_openmm(),
+                self._mof_top.to_openmm(),
                 mof_openmm_sys,
-                openmm_integrator,
-                platform=openmm.Platform.getPlatformByName("CPU"),
+                deepcopy(self.integrator),
+                platform=openmm.Platform.getPlatformByName(self.platform_name),
             )
-            openmm_sim.context.setPositions(to_openmm(positions))
+            openmm_sim.context.setPositions(positions)
 
         pdb_reporter = openmm.app.PDBReporter("out.pdb", 1)
         openmm_sim.reporters.append(pdb_reporter)
 
         if minimize_energy:
             openmm_sim.minimizeEnergy()
-        # openmm_sim.step(1)
 
         context = openmm_sim.context.getState(getEnergy=True)
         return context.getPotentialEnergy()
+
 
     def suggest_gas_position(self, current_positions):
         while True:
@@ -184,9 +159,15 @@ class Simulation(BaseModel):
             rotation_matrix = scipy.spatial.transform.Rotation.random().as_matrix()
             shift = np.array(
                 [
-                    random.uniform(0, self.box_dim.value_in_unit(openmm.unit.nanometer)),
-                    random.uniform(0, self.box_dim.value_in_unit(openmm.unit.nanometer)),
-                    random.uniform(0, self.box_dim.value_in_unit(openmm.unit.nanometer)),
+                    random.uniform(
+                        0, self.box_dim.value_in_unit(openmm.unit.nanometer)
+                    ),
+                    random.uniform(
+                        0, self.box_dim.value_in_unit(openmm.unit.nanometer)
+                    ),
+                    random.uniform(
+                        0, self.box_dim.value_in_unit(openmm.unit.nanometer)
+                    ),
                 ]
             )  # nm
             new_pos = np.dot(new_pos, rotation_matrix) + shift
@@ -194,7 +175,9 @@ class Simulation(BaseModel):
 
             for atom in new_pos:
                 for dim in atom:
-                    if dim < 0 or dim > self.box_dim.value_in_unit(openmm.unit.nanometer):
+                    if dim < 0 or dim > self.box_dim.value_in_unit(
+                        openmm.unit.nanometer
+                    ):
                         valid = False
 
             for existing_atom in current_positions.value_in_unit(openmm.unit.nanometer):
@@ -209,6 +192,7 @@ class Simulation(BaseModel):
 
             return new_pos
 
+
     def build_context(self, num_gases, positions) -> openmm.Context:
         mof_openmm_sys = deepcopy(self._mof_openmm_sys)
 
@@ -222,26 +206,28 @@ class Simulation(BaseModel):
             openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
 
             context = openmm.Context(
-                openmm_sys, deepcopy(self.integrator), openmm.Platform.getPlatformByName("CPU")
+                openmm_sys,
+                deepcopy(self.integrator),
+                openmm.Platform.getPlatformByName(self.platform_name),
             )
             context.setPositions(positions)
         else:
             context = openmm.Context(
                 mof_openmm_sys,
                 self.integrator,
-                openmm.Platform.getPlatformByName("CPU"),
+                openmm.Platform.getPlatformByName(self.platform_name),
             )
             context.setPositions(positions)
 
         return context
 
+
     def get_context(self, num_gases: int) -> openmm.Context:
         if num_gases not in self._contexts:
             if num_gases - 1 not in self._contexts:
-                print(
+                raise ValueError(
                     "This function uses the next number smaller as the basis for the next context, and for some reason the context for the previous number of gases is not available."
                 )
-                assert num_gases - 1 in self._contexts
 
             previous_context = self._contexts[num_gases - 1]
             previous_state = previous_context.getState(getPositions=True)
@@ -257,19 +243,22 @@ class Simulation(BaseModel):
             self._contexts[num_gases] = new_context
         return self._contexts[num_gases]
 
-    def simulate(self, steps: int) -> float:
-        # gases = []  # Must be a list where elements are Quantity<[x, y, z] * unit.nanometer> coordinates
+
+    def simulate(self, steps: int, apply_energy_minimizer: bool) -> float:
         ATOMS_PER_GAS_MOLECULE = len(self._gas.atoms)
         GAS_FORMATION_ENERGY = self.gas_formation_energy()
         num_gases = 0
-        old_energy = (
-            self.get_context(0).getState(getEnergy=True).getPotentialEnergy()
-        )
+        old_energy = self.get_context(0).getState(getEnergy=True).getPotentialEnergy()
 
-        for timestep in range(1):
+        start_time = time.time()
+        step_times = []
+
+        for timestep in range(steps):
+            step_start_time = time.time()
+
             old_context = self.get_context(num_gases)
             operation = random.random()
-            operation = 0.01
+            # operation = 0.01
             positions = old_context.getState(getPositions=True).getPositions(
                 asNumpy=True
             )[:]
@@ -285,28 +274,13 @@ class Simulation(BaseModel):
                 new_pos = np.vstack((positions, new_gas))
                 new_context.setPositions(new_pos)
 
-                print(new_context.getState(getEnergy=True).getPotentialEnergy())
-                LocalEnergyMinimizer.minimize(new_context)
+                if apply_energy_minimizer:
+                    LocalEnergyMinimizer.minimize(new_context)
 
                 new_energy = (
                     new_context.getState(getEnergy=True).getPotentialEnergy()
                     - GAS_FORMATION_ENERGY
                 )
-                print(new_context.getState(getEnergy=True).getPotentialEnergy())
-                print("system_energy")
-                print(
-                    self.system_energy(
-                        ([x * unit.nanometer for x in np.vstack((gases, new_gas))]),
-                        True,
-                    )
-                )
-                print(
-                    self.system_energy(
-                        ([x * unit.nanometer for x in np.vstack((gases, new_gas))]),
-                        False,
-                    )
-                )
-                print()
 
                 if self.monte_carlo(new_energy, old_energy):
                     print("Accepted")
@@ -314,7 +288,7 @@ class Simulation(BaseModel):
                     old_energy = new_energy
                     self._contexts[num_gases] = new_context
 
-            elif operation < 2 * PROB_INSERT_DELETE:  # Delete
+            elif operation < 2 * self.prob_insert_delete:  # Delete
                 if len(gases) == 0:
                     continue
                 print("Deleting")
@@ -331,15 +305,17 @@ class Simulation(BaseModel):
                     0,
                 )
                 positions = np.vstack(
-                    (positions[: len(MOF_TOP.get_positions())], gases)
+                    (positions[: len(self._mof_top.get_positions())], gases)
                 )
                 new_context.setPositions(positions)
+                if apply_energy_minimizer:
+                    LocalEnergyMinimizer.minimize(new_context)
                 new_energy = (
                     new_context.getState(getEnergy=True).getPotentialEnergy()
                     + GAS_FORMATION_ENERGY
                 )
 
-                if monte_carlo_test(new_energy, old_energy):
+                if self.monte_carlo(new_energy, old_energy):
                     print("Accepted")
                     num_gases -= 1
                     old_energy = new_energy
@@ -364,17 +340,104 @@ class Simulation(BaseModel):
                     * ATOMS_PER_GAS_MOLECULE : (gas_to_translate + 1)
                     * ATOMS_PER_GAS_MOLECULE
                 ] = (new_gas * openmm.unit.nanometer)
-                positions[len(MOF_TOP.get_positions()) :] = gases
+                positions[len(self._mof_top.get_positions()) :] = gases
                 new_context.setPositions(positions)
+                if apply_energy_minimizer:
+                    LocalEnergyMinimizer.minimize(new_context)
                 new_energy = new_context.getState(getEnergy=True).getPotentialEnergy()
 
-                if monte_carlo_test(new_energy, old_energy):
+                if self.monte_carlo(new_energy, old_energy):
                     print("Accepted")
                     old_energy = new_energy
                     self._contexts[num_gases] = new_context
                 else:
                     new_context.setPositions(old_positions)
                     self._contexts[num_gases] = new_context
+
             print("Step: ", timestep)
             print("Num gas molecules:", num_gases)
+            avg_distance = self.calculate_average_gas_distance(num_gases)
+            print(f"Average gas distance: {avg_distance}")
+            if timestep > 0:
+                time_per_step = (time.time() - start_time) / timestep
+                steps_per_second = 1 / time_per_step
+                estimated_time_remaining = (steps - timestep - 1) * time_per_step
+                print(f"Time per step: {time_per_step}")
+                print(f"Steps per second: {steps_per_second}")
+                print(f"Estimated time remaining (secs): {estimated_time_remaining}")
             print()
+
+            self.write_xyz("out.xyz", num_gases)
+
+        return num_gases
+
+
+    def write_xyz(self, filename: str, num_gases: int):
+        context = self.get_context(num_gases)
+
+        state = context.getState(getPositions=True)
+        positions = state.getPositions(asNumpy=True)
+
+        positions = positions.value_in_unit(openmm.unit.angstrom)
+
+        elements = []
+        for atom in self._mof_top.atoms:
+            elements.append(atom.symbol)
+        # Add elements from each gas molecule
+        for _ in range(num_gases):
+            for atom in self._gas.atoms:
+                elements.append(atom.symbol)
+        # Write to the XYZ file
+        with open(filename, 'w') as f:
+            f.write(f"{len(elements)}\n")
+            f.write("Generated by OpenMM Simulation\n")
+            for element, (x, y, z) in zip(elements, positions):
+                f.write(f"{element} {x:.6f} {y:.6f} {z:.6f}\n")
+
+
+    def calculate_average_gas_distance(self, num_gases: int) -> openmm.unit.Quantity:
+        """
+        Calculate the average minimum distance between each CO2 molecule's closest atom and all other atoms in the system, considering periodic boundary conditions.
+
+        Args:
+            num_gases (int): Number of CO2 molecules in the current system.
+
+        Returns:
+            float: Average minimum distance in nanometers. Returns 0.0 if there are no CO2 molecules.
+        """
+        if num_gases < 1:
+            return 0.0
+
+        context = self.get_context(num_gases)
+        state = context.getState(getPositions=True)
+        positions = state.getPositions(asNumpy=True)
+        positions_nm = positions.value_in_unit(openmm.unit.nanometer)
+
+        mof_atom_count = self._mof_top.n_atoms
+        atoms_per_gas = self._gas.n_atoms
+        total_min = 0.0
+
+        all_positions = positions_nm  # All atoms including MOF and gas
+
+        for gas_idx in range(num_gases):
+            start = mof_atom_count + gas_idx * atoms_per_gas
+            end = start + atoms_per_gas
+            current_co2_indices = np.arange(start, end)
+            mask = np.ones(len(all_positions), dtype=bool)
+            mask[current_co2_indices] = False
+            other_positions = all_positions[mask]
+
+            co2_atoms = all_positions[start:end]
+
+            min_dist = np.inf
+            for atom in co2_atoms:
+                displacements = other_positions - atom
+                min_image_displacements = np.array([self._pbc.min_image(disp) for disp in displacements])
+                current_min = np.min(min_image_displacements)
+                if current_min < min_dist:
+                    min_dist = current_min
+
+            total_min += min_dist
+
+        average = total_min / num_gases
+        return average * openmm.unit.nanometer
