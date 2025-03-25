@@ -39,8 +39,12 @@ class Simulation(BaseModel):
     r_cutoff: openmm.unit.Quantity = 0.1 * openmm.unit.nanometer
     box_dim: openmm.unit.Quantity
     is_periodic: bool = True
+    # If we're not doing any actual MD, we can chuck this and just use the cheapest possible
+    # integrator to initialize. Don't believe the integrator would affect the context's
+    # energy calculation
     integrator: openmm.Integrator
     platform_name: str
+    output_file_freq: int
 
     _gas: Molecule
     _ff: ForceField
@@ -242,7 +246,7 @@ class Simulation(BaseModel):
 
             old_context = self.get_context(num_gases)
             operation = random.random()
-            # operation = 0.01
+
             positions = old_context.getState(getPositions=True).getPositions(
                 asNumpy=True
             )[:]
@@ -351,7 +355,8 @@ class Simulation(BaseModel):
                 print(f"Estimated time remaining (secs): {estimated_time_remaining}")
             print()
 
-            self.write_xyz("out.xyz", num_gases)
+            if timestep % self.output_file_freq == 0:
+                self.write_xyz(f"out-{timestep}.xyz", num_gases)
 
         return num_gases
 

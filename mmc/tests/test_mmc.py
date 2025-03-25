@@ -82,6 +82,7 @@ def test_hkust_co2():
         'box_dim': 2.6343 * openmm.unit.nanometer,
         'integrator': openmm.LangevinIntegrator(298, 1, 0.002),
         'platform_name': "CPU",
+        'output_file_freq': 100,
     })
 
     sim.simulate(1000000, True)
