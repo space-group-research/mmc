@@ -1,5 +1,5 @@
 from math import inf
-from mmc.utils import BOLTZMANN, append_system
+from mmc.utils import BOLTZMANN, append_system, monte_carlo, gas_formation_energy
 from mmc.pdb_wizard import PBC
 from pydantic import BaseModel, FilePath
 from typing import List
@@ -76,39 +76,22 @@ class Simulation(BaseModel):
             topology=self._mof_top, force_field=self._ff
         )
         self._mof_openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
+
         for i in range(self._mof_openmm_sys.getNumParticles()):
             self._mof_openmm_sys.setParticleMass(i, 0.0)
+        self._mof_openmm_sys.addForce(openmm.HarmonicBondForce())
+        self._mof_openmm_sys.addForce(openmm.HarmonicAngleForce())
+        self._mof_openmm_sys.addForce(openmm.PeriodicTorsionForce())
+
+        # nonbonded_force = openmm.NonbondedForce()
+        # nonbonded_force.setNonbondedMethod(openmm.NonbondedForce.NoCutoff)
+
+        # self._mof_openmm_sys.addForce(nonbonded_force)
 
         if self.platform_name not in ["CPU", "GPU"]:
             raise Exception("Invalid platform name. Must be 'CPU' or 'GPU'")
 
         self._contexts = {0: self.build_context(0, self._mof_top.get_positions().m)}
-
-
-    def gas_formation_energy(self):
-        gas_mols = [deepcopy(self._gas)]
-        gas_top = Topology.from_molecules(gas_mols)
-        interchange = Interchange.from_smirnoff(topology=gas_top, force_field=self._ff)
-        openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
-
-        openmm_sim = openmm.app.Simulation(
-            gas_top.to_openmm(),
-            openmm_sys,
-            deepcopy(self.integrator),
-            platform=openmm.Platform.getPlatformByName(self.platform_name),
-        )
-
-        openmm_sim.context.setPositions(self.gas_pos)
-        openmm_sim.minimizeEnergy()
-        context = openmm_sim.context.getState(getEnergy=True)
-        return context.getPotentialEnergy()
-
-    def monte_carlo(self, new_energy, old_energy):
-        delta_energy = new_energy - old_energy
-        probability = np.exp(-delta_energy / (BOLTZMANN * self.temperature))
-        random_number = random.uniform(0, 1)
-
-        return probability >= random_number
 
 
     def system_energy(
@@ -246,7 +229,8 @@ class Simulation(BaseModel):
 
     def simulate(self, steps: int, apply_energy_minimizer: bool) -> float:
         ATOMS_PER_GAS_MOLECULE = len(self._gas.atoms)
-        GAS_FORMATION_ENERGY = self.gas_formation_energy()
+        GAS_FORMATION_ENERGY = \
+            gas_formation_energy(self._gas, self._ff, deepcopy(self.integrator), self.platform_name, self.gas_pos)
         num_gases = 0
         old_energy = self.get_context(0).getState(getEnergy=True).getPotentialEnergy()
 
@@ -282,7 +266,7 @@ class Simulation(BaseModel):
                     - GAS_FORMATION_ENERGY
                 )
 
-                if self.monte_carlo(new_energy, old_energy):
+                if monte_carlo(self.temperature, new_energy, old_energy):
                     print("Accepted")
                     num_gases += 1
                     old_energy = new_energy
@@ -315,7 +299,7 @@ class Simulation(BaseModel):
                     + GAS_FORMATION_ENERGY
                 )
 
-                if self.monte_carlo(new_energy, old_energy):
+                if monte_carlo(self.temperature, new_energy, old_energy):
                     print("Accepted")
                     num_gases -= 1
                     old_energy = new_energy
@@ -346,7 +330,7 @@ class Simulation(BaseModel):
                     LocalEnergyMinimizer.minimize(new_context)
                 new_energy = new_context.getState(getEnergy=True).getPotentialEnergy()
 
-                if self.monte_carlo(new_energy, old_energy):
+                if monte_carlo(self.temperature, new_energy, old_energy):
                     print("Accepted")
                     old_energy = new_energy
                     self._contexts[num_gases] = new_context

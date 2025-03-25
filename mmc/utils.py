@@ -278,3 +278,36 @@ def create_empty_system():
     system.addForce(nonbonded_force)
 
     return system
+
+def monte_carlo(temperature: openmm.unit.Quantity, new_energy: openmm.unit.Quantity, old_energy: openmm.unit.Quantity) -> bool:
+    delta_energy = new_energy - old_energy
+    probability = np.exp(-delta_energy / (BOLTZMANN * temperature))
+    random_number = random.uniform(0, 1)
+
+    return probability >= random_number
+
+
+def gas_formation_energy(
+        gas: Molecule,
+        ff: ForceField,
+        integrator: openmm.Integrator,
+        platform_name: str,
+        gas_pos: openmm.unit.Quantity
+) -> openmm.unit.Quantity:
+    gas_mols = [deepcopy(gas)]
+    gas_top = Topology.from_molecules(gas_mols)
+    interchange = Interchange.from_smirnoff(topology=gas_top, force_field=ff)
+    openmm_sys = interchange.to_openmm(combine_nonbonded_forces=False)
+
+    openmm_sim = openmm.app.Simulation(
+        gas_top.to_openmm(),
+        openmm_sys,
+        deepcopy(integrator),
+        platform=openmm.Platform.getPlatformByName(platform_name),
+    )
+
+    openmm_sim.context.setPositions(gas_pos)
+    openmm_sim.minimizeEnergy()
+    context = openmm_sim.context.getState(getEnergy=True)
+    assert (type(context.getPotentialEnergy())) == openmm.unit.Quantity
+    return context.getPotentialEnergy()
