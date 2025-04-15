@@ -17,6 +17,8 @@ import random
 from copy import deepcopy
 import scipy
 
+from mmc.pdb_wizard import PBC
+
 BOLTZMANN = openmm.unit.BOLTZMANN_CONSTANT_kB * openmm.unit.AVOGADRO_CONSTANT_NA
 
 
@@ -311,3 +313,45 @@ def gas_formation_energy(
     context = openmm_sim.context.getState(getEnergy=True)
     assert (type(context.getPotentialEnergy())) == openmm.unit.Quantity
     return context.getPotentialEnergy()
+
+
+def calculate_average_gas_distance(num_gases: int, positions_nm: openmm.unit.Quantity, mof_atom_count: int, atoms_per_gas: int, pbc: PBC) -> openmm.unit.Quantity:
+    """
+    Calculate the average minimum distance between each CO2 molecule's closest atom and all other atoms in the system, considering periodic boundary conditions.
+    """
+    if num_gases < 1:
+        return 0.0 * openmm.unit.nanometer
+
+    # context = self.get_context(num_gases)
+    # state = context.getState(getPositions=True)
+    # positions = state.getPositions(asNumpy=True)
+    # positions_nm = positions.value_in_unit(openmm.unit.nanometer)
+
+    # mof_atom_count = self._mof_top.n_atoms
+    # atoms_per_gas = self._gas.n_atoms
+    total_min = 0.0
+
+    all_positions = positions_nm  # All atoms including MOF and gas
+
+    for gas_idx in range(num_gases):
+        start = mof_atom_count + gas_idx * atoms_per_gas
+        end = start + atoms_per_gas
+        current_co2_indices = np.arange(start, end)
+        mask = np.ones(len(all_positions), dtype=bool)
+        mask[current_co2_indices] = False
+        other_positions = all_positions[mask]
+
+        co2_atoms = all_positions[start:end]
+
+        min_dist = np.inf
+        for atom in co2_atoms:
+            displacements = other_positions - atom
+            min_image_displacements = np.array([pbc.min_image(disp) for disp in displacements])
+            current_min = np.min(min_image_displacements)
+            if current_min < min_dist:
+                min_dist = current_min
+
+        total_min += min_dist
+
+    average = total_min / num_gases
+    return average * openmm.unit.nanometer
